@@ -9,7 +9,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # ==========================================
-# 1. YOUR SPECIFIC ENVIRONMENT CLASS
+# 1. ENVIRONMENT CLASS (Unchanged)
 # ==========================================
 class SmartBedroomDustEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 4}
@@ -22,7 +22,6 @@ class SmartBedroomDustEnv(gym.Env):
         self.steps_per_episode = int(episode_hours * 60.0 / dt_minutes)
         self.action_space = spaces.Discrete(4)
         
-        # State: [Indoor, Outdoor, Occ, Hum, Temp, Win]
         low = np.array([5.0, 5.0, 0.0, 20.0, 15.0, 0.0], dtype=np.float32)
         high = np.array([140.0, 80.0, 1.0, 80.0, 30.0, 1.0], dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
@@ -54,20 +53,18 @@ class SmartBedroomDustEnv(gym.Env):
         self.total_energy_Wh = 0.0
         self.cumulative_pm = 0.0
         self.state = np.array([
-            np.random.uniform(15.0, 50.0), # Indoor
-            np.random.uniform(5.0, 80.0),  # Outdoor
-            1.0,                           # Occupancy
-            np.random.uniform(40.0, 60.0), # Humidity
-            np.random.uniform(15.0, 30.0), # Temp
-            0.0                            # Window
+            np.random.uniform(15.0, 50.0), np.random.uniform(5.0, 80.0), 1.0, 
+            np.random.uniform(40.0, 60.0), np.random.uniform(15.0, 30.0), 0.0
         ], dtype=np.float32)
         return self.state.copy(), {}
 
     def step(self, action):
         Cin, Cout, occ, hum, temp, win = self.state
-        hour = (self.current_step * self.dt_minutes) / 60.0
-        Cout_next = self._update_outdoor_pm(hour)
-        occ_next, win_next = self._update_occupancy_window(int(round(occ)), win, hour)
+        total_hours_elapsed = (self.current_step * self.dt_minutes) / 60.0
+        hour_of_day = total_hours_elapsed % 24.0
+        
+        Cout_next = self._update_outdoor_pm(hour_of_day)
+        occ_next, win_next = self._update_occupancy_window(int(round(occ)), win, hour_of_day)
         
         idx = int(np.clip(np.round(win_next * 4), 0, 4))
         alpha = float(self.aer_levels[idx])
@@ -90,180 +87,277 @@ class SmartBedroomDustEnv(gym.Env):
         self.current_step += 1
         truncated = self.current_step >= self.steps_per_episode
 
-        # --- INFO DICTIONARY ---
         info = {
-            "avg_indoor_pm2_5": Cin_next,
-            "outdoor_pm2_5": Cout_next,
+            "avg_indoor_pm2_5": Cin_next, 
+            "outdoor_pm2_5": Cout_next, 
             "total_energy_Wh": self.total_energy_Wh,
-            "action_name": ["Off", "Low", "Moderate", "High"][int(action)],
+            "step_energy_Wh": energy_Wh, 
+            "action_name": ["Off", "Low", "Moderate", "High"][int(action)], 
             "occupancy": int(round(occ_next)),
-            "humidity": hum_next,
-            "temperature": temp_next,
-            "window_status": win_next
+            "humidity": hum_next, 
+            "temperature": temp_next, 
+            "window_status": win_next,
+            "day": int(total_hours_elapsed // 24) + 1, 
+            "hour": hour_of_day
         }
-        
         return self.state.copy(), float(reward), False, truncated, info
 
     def _update_outdoor_pm(self, hour):
         base = 55.0 + 15.0 * np.sin(2 * np.pi * (hour / 24.0))
         return float(np.clip(base + np.random.normal(0.0, self.outdoor_noise_std), 5.0, 80.0))
-
     def _update_occupancy_window(self, occ, win, hour):
         if 22 <= hour or hour < 7: base_occ = 0.9
         elif 7 <= hour < 9 or 18 <= hour < 22: base_occ = 0.5
         else: base_occ = 0.2
-        
         if np.random.rand() < 0.1: occ_next = 1 if np.random.rand() < base_occ else 0
         else: occ_next = int(occ)
-
         if 9 <= hour < 18: 
-            change_prob = 0.08
-            level_probs = np.array([0.25, 0.25, 0.25, 0.15, 0.10])
+            change_prob = 0.08; level_probs = np.array([0.25, 0.25, 0.25, 0.15, 0.10])
         else: 
-            change_prob = 0.05
-            level_probs = np.array([0.60, 0.25, 0.10, 0.04, 0.01])
-
+            change_prob = 0.05; level_probs = np.array([0.60, 0.25, 0.10, 0.04, 0.01])
         if np.random.rand() < change_prob: win_next = float(np.random.choice(self.window_levels, p=level_probs))
         else: win_next = float(win)
         return occ_next, win_next
-
     def _sample_source_emission(self, occ, win):
         if occ == 1: p, mean, std = self.source_prob_occ, 15.0, 5.0
         else: p, mean, std = self.source_prob_empty, 8.0, 4.0
         return float(max(np.random.normal(mean, std), 0.0)) if np.random.rand() < p else 0.0
-
     def _compute_reward(self, Cin, action):
         normalized_pm = np.clip(Cin / self.pm_ref, 0, 3.0)
         return float(-(self.w_pm * np.exp(normalized_pm ** 2) + self.w_energy * self.power_values[action]))
-
     def render(self): pass
     def close(self): pass
 
 # ==========================================
-# 2. STREAMLIT APP LOGIC
+# 2. STREAMLIT APP
 # ==========================================
 
-st.set_page_config(page_title="Smart Bedroom Dust Control System Using Reinforcement Learning(PPO)", layout="wide")
+st.set_page_config(page_title="Smart Bedroom Dust Control", layout="wide")
+
+MODEL_PATH = "ppo_advanced_myenv/final_model.zip"
+STATS_PATH = "ppo_advanced_myenv/vec_normalize.pkl"
 
 st.title("🏡 Smart Bedroom Agent - Performance Dashboard")
 
-# --- SIDEBAR ---
-st.sidebar.header("Configuration")
-model_path = st.sidebar.text_input("Model Path", "ppo_advanced_myenv/final_model.zip")
-stats_path = st.sidebar.text_input("Stats Path", "ppo_advanced_myenv/vec_normalize.pkl")
-sim_speed = st.sidebar.slider("Speed", 0.01, 0.5, 0.05)
+# --- SESSION STATE INITIALIZATION ---
+if 'simulation_running' not in st.session_state: st.session_state.simulation_running = False
+if 'paused' not in st.session_state: st.session_state.paused = False
+if 'last_metrics' not in st.session_state: st.session_state.last_metrics = {}
+if 'num_days' not in st.session_state: st.session_state.num_days = 1
 
-# --- STOP BUTTON ---
-if st.sidebar.button("⛔ Stop Simulation"):
-    st.stop()
-
-# --- LOAD AGENT ---
 @st.cache_resource
-def load_agent(model_path, stats_path):
-    env = SmartBedroomDustEnv(dt_minutes=5.0, episode_hours=24.0)
+def load_agent(episode_hours):
+    env = SmartBedroomDustEnv(dt_minutes=5.0, episode_hours=episode_hours)
     env = DummyVecEnv([lambda: env])
-    if os.path.exists(stats_path):
-        env = VecNormalize.load(stats_path, env)
-        env.training = False
-        env.norm_reward = False
+    if os.path.exists(STATS_PATH):
+        env = VecNormalize.load(STATS_PATH, env)
+        env.training = False; env.norm_reward = False
     else:
-        st.error(f"❌ Stats not found: {stats_path}")
-        st.stop()
-    try:
-        model = PPO.load(model_path, env=env)
-    except Exception as e:
-        st.error(f"❌ Error loading model: {e}")
-        st.stop()
+        st.error(f"❌ Stats not found: {STATS_PATH}"); st.stop()
+    try: model = PPO.load(MODEL_PATH, env=env)
+    except Exception as e: st.error(f"❌ Error loading model: {e}"); st.stop()
     return model, env
 
-# --- START BUTTON ---
-if st.button("▶️ Start Simulation"):
-    model, env = load_agent(model_path, stats_path)
-    
-    # 1. Status Message
-    status_text = st.empty()
-    status_text.info("Simulation Running... (Click 'Stop' in sidebar to cancel)")
+# --- SIDEBAR ---
+st.sidebar.header("Configuration")
+sim_speed = st.sidebar.slider("Simulation Speed", 0.01, 0.5, 0.05)
 
-    # --- LAYOUT: REVERTED TO TWO ROWS ---
+if st.session_state.simulation_running:
+    min_day_val = st.session_state.num_days
+else:
+    min_day_val = 1
+
+num_days = st.sidebar.slider(
+    "Simulation Duration (Days)", 
+    min_value=min_day_val, 
+    max_value=30, 
+    key='num_days', 
+    help="You can extend the duration while paused, but you cannot shorten it."
+)
+
+total_hours = 24.0 * num_days
+
+# --- CALLBACK FUNCTION FOR RESET ---
+def reset_simulation_callback():
+    st.session_state.simulation_running = False
+    st.session_state.paused = False
+    st.session_state.num_days = 1
+
+# --- BUTTONS ---
+if st.sidebar.button("▶️ Start Simulation"):
+    st.session_state.simulation_running = True
+    st.session_state.paused = False
+    # === UPDATED DATAFRAME COLUMNS ===
+    st.session_state.history_df = pd.DataFrame(columns=[
+        "Step", "Indoor PM", "Outdoor PM", "Temp", "Hum", "Window", "Occupied", "Action", "Step Energy", "Total Energy"
+    ])
+    st.session_state.current_step = 0
+    st.session_state.current_obs = None
+    st.session_state.last_metrics = {}
+    st.session_state.env_vars = {'state': None, 'total_energy': 0.0, 'cum_pm': 0.0, 'step': 0}
+    st.rerun()
+
+if st.session_state.simulation_running:
+    if st.session_state.paused:
+        if st.sidebar.button("▶️ Resume Simulation"):
+            st.session_state.paused = False
+            st.rerun()
+    else:
+        if st.sidebar.button("⏸ Pause Simulation"):
+            st.session_state.paused = True
+            st.rerun()
+
+st.sidebar.button("⏹ Cancel Simulation", on_click=reset_simulation_callback)
+
+# --- MAIN LOGIC ---
+if st.session_state.simulation_running:
+    model, env = load_agent(total_hours)
+    real_env = env.venv.envs[0]
     
-    # Row 1: Primary Metrics
+    if st.session_state.current_step == 0:
+        obs = env.reset(); st.session_state.current_obs = obs; st.session_state.env_vars['state'] = real_env.state.copy()
+    else:
+        obs = env.reset()
+        real_env.current_step = st.session_state.env_vars['step']
+        real_env.total_energy_Wh = st.session_state.env_vars['total_energy']
+        real_env.cumulative_pm = st.session_state.env_vars['cum_pm']
+        real_env.state = st.session_state.env_vars['state']
+        obs = st.session_state.current_obs
+
+    status_text = st.empty()
     st.subheader("🔴 Action & Air Quality")
     col1, col2, col3, col4 = st.columns(4)
-    with col1: act_metric = st.empty()
-    with col2: pm_metric = st.empty()
-    with col3: out_metric = st.empty()
-    with col4: energy_metric = st.empty()
+    act_metric = col1.empty(); pm_metric = col2.empty(); out_metric = col3.empty(); energy_metric = col4.empty()
     
-    # Row 2: Secondary States (Temp, Hum, Occupancy, Window)
     st.subheader("🔵 Bedroom State")
     col5, col6, col7, col8 = st.columns(4)
-    with col5: temp_metric = st.empty()
-    with col6: hum_metric = st.empty()
-    with col7: occ_metric = st.empty()
-    with col8: win_metric = st.empty()
+    temp_metric = col5.empty(); hum_metric = col6.empty(); occ_metric = col7.empty(); win_metric = col8.empty()
 
-    # Live Charts
+    # --- GRAPHS SECTION ---
     st.subheader("📈 Live History")
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1: pm_chart = st.empty()
-    with chart_col2: energy_chart = st.empty()
+    
+    # Top Row: PM2.5 and Total Accumulated Energy
+    row1_col1, row1_col2 = st.columns(2)
+    pm_chart = row1_col1.empty()
+    total_energy_chart = row1_col2.empty()
+    
+    # Bottom Row: Energy per Step (Full Width)
+    st.markdown("---") 
+    step_energy_chart = st.empty()
+
+    # --- NEW: DATA TABLE SECTION ---
+    st.subheader("📋 Simulation Data Log")
+    data_table_placeholder = st.empty()
+    
+    progress_bar = st.progress(0)
+    total_steps_needed = 288 * num_days
+
+    # Restore Metrics if Paused
+    if st.session_state.last_metrics:
+        m = st.session_state.last_metrics
+        act_metric.metric("Action", m['act'])
+        pm_metric.metric("Indoor PM", f"{m['indoor']:.1f}")
+        out_metric.metric("Outdoor PM", f"{m['outdoor']:.1f}")
+        energy_metric.metric("Total Energy", f"{m['energy']:.0f} Wh")
+        temp_metric.metric("Temp", f"{m['temp']:.1f}°C")
+        hum_metric.metric("Humidity", f"{m['hum']:.1f}%")
+        occ_metric.metric("Occupied", m['occ'])
+        win_metric.metric("Window", m['win'])
+
+    # Re-draw content from history if it exists
+    if not st.session_state.history_df.empty:
+        with pm_chart.container():
+            st.caption("Indoor vs Outdoor PM2.5")
+            st.line_chart(st.session_state.history_df.set_index("Step")[["Indoor PM", "Outdoor PM"]])
+        with step_energy_chart.container():
+            st.caption("Energy Used per Step (Instantaneous)")
+            st.line_chart(st.session_state.history_df.set_index("Step")["Step Energy"], color="#FF5733")
+        with total_energy_chart.container():
+            st.caption("Total Accumulated Energy")
+            st.area_chart(st.session_state.history_df.set_index("Step")["Total Energy"], color="#2ecc71")
+        # Draw Table
+        with data_table_placeholder.container():
+            st.dataframe(st.session_state.history_df.sort_values(by="Step", ascending=True), height=300)
 
     # --- SIMULATION LOOP ---
-    obs = env.reset()
-    done = False
-    history_df = pd.DataFrame(columns=["Step", "Indoor PM", "Outdoor PM", "Energy", "Temp", "Hum"])
-    step = 0
-    progress_bar = st.progress(0)
-
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, info = env.step(action)
+    if st.session_state.paused:
+        status_text.warning("⚠️ Simulation Paused. You can extend Duration, but not shorten it.")
+        progress_bar.progress(min(st.session_state.current_step / total_steps_needed, 1.0))
+    else:
+        status_text.info(f"Simulation Running... Day {int(real_env.current_step*5/60//24)+1}")
+        done = False
+        obs = st.session_state.current_obs
         
-        real_info = info[0]
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, info = env.step(action)
+            real_info = info[0]
+            
+            indoor = real_info["avg_indoor_pm2_5"]; outdoor = real_info["outdoor_pm2_5"]
+            total_energy = real_info["total_energy_Wh"]
+            step_energy = real_info["step_energy_Wh"]
+            act_name = real_info["action_name"]
+            temp = real_info["temperature"]; hum = real_info["humidity"]
+            occ = "Yes" if real_info["occupancy"] == 1 else "No"
+            win_str = "Open" if real_info["window_status"] == 1.0 else ("Closed" if real_info["window_status"] == 0.0 else f"{int(real_info['window_status']*100)}%")
+
+            act_metric.metric("Action", act_name)
+            pm_metric.metric("Indoor PM", f"{indoor:.1f}")
+            out_metric.metric("Outdoor PM", f"{outdoor:.1f}")
+            energy_metric.metric("Total Energy", f"{total_energy:.0f} Wh")
+            temp_metric.metric("Temp", f"{temp:.1f}°C")
+            hum_metric.metric("Humidity", f"{hum:.1f}%")
+            occ_metric.metric("Occupied", occ)
+            win_metric.metric("Window", win_str)
+
+            st.session_state.last_metrics = {
+                'act': act_name, 'indoor': indoor, 'outdoor': outdoor, 'energy': total_energy,
+                'temp': temp, 'hum': hum, 'occ': occ, 'win': win_str
+            }
+
+            # Add ALL metrics to the new row
+            new_row = pd.DataFrame({
+                "Step": [st.session_state.current_step], 
+                "Indoor PM": [indoor], 
+                "Outdoor PM": [outdoor], 
+                "Temp": [temp], 
+                "Hum": [hum],
+                "Window": [win_str],
+                "Occupied": [occ],
+                "Action": [act_name],
+                "Step Energy": [step_energy],
+                "Total Energy": [total_energy]
+            })
+            st.session_state.history_df = pd.concat([st.session_state.history_df, new_row], ignore_index=True)
+            st.session_state.current_step += 1
+            st.session_state.current_obs = obs
+            
+            st.session_state.env_vars['state'] = real_env.state.copy()
+            st.session_state.env_vars['total_energy'] = real_env.total_energy_Wh
+            st.session_state.env_vars['cum_pm'] = real_env.cumulative_pm
+            st.session_state.env_vars['step'] = real_env.current_step
+
+            # Update Charts
+            with pm_chart.container():
+                st.caption("Indoor vs Outdoor PM2.5")
+                st.line_chart(st.session_state.history_df.set_index("Step")[["Indoor PM", "Outdoor PM"]])
+            with step_energy_chart.container():
+                st.caption("Energy Used per Step (Instantaneous)")
+                st.line_chart(st.session_state.history_df.set_index("Step")["Step Energy"], color="#FF5733")
+            with total_energy_chart.container():
+                st.caption("Total Accumulated Energy")
+                st.area_chart(st.session_state.history_df.set_index("Step")["Total Energy"], color="#2ecc71")
+            
+            # Update Table (Sorted so newest step is at top)
+            with data_table_placeholder.container():
+                st.dataframe(st.session_state.history_df.sort_values(by="Step", ascending=True), height=300)
+                
+            progress_bar.progress(min(st.session_state.current_step / total_steps_needed, 1.0))
+            
+            time.sleep(sim_speed)
         
-        # Extract Values
-        indoor = real_info["avg_indoor_pm2_5"]
-        outdoor = real_info["outdoor_pm2_5"]
-        energy = real_info["total_energy_Wh"]
-        act_name = real_info["action_name"]
-        temp = real_info["temperature"]
-        hum = real_info["humidity"]
-        occ = "Yes" if real_info["occupancy"] == 1 else "No"
-        
-        win_val = real_info["window_status"]
-        if win_val == 0.0: win_str = "Closed"
-        elif win_val == 1.0: win_str = "Open"
-        else: win_str = f"{int(win_val*100)}%"
-
-        # --- UPDATE UI ---
-        
-        # Row 1
-        act_metric.metric("Action", act_name)
-        pm_metric.metric("Indoor PM", f"{indoor:.1f}", delta=f"{15-indoor:.1f}")
-        out_metric.metric("Outdoor PM", f"{outdoor:.1f}")
-        energy_metric.metric("Energy", f"{energy:.0f} Wh")
-
-        # Row 2
-        temp_metric.metric("Temp", f"{temp:.1f}°C")
-        hum_metric.metric("Humidity", f"{hum:.1f}%")
-        occ_metric.metric("Occupied", occ)
-        win_metric.metric("Window", win_str)
-
-        # Charts
-        new_row = pd.DataFrame({
-            "Step": [step], "Indoor PM": [indoor], "Outdoor PM": [outdoor], 
-            "Energy": [energy], "Temp": [temp], "Hum": [hum]
-        })
-        history_df = pd.concat([history_df, new_row], ignore_index=True)
-        
-        with pm_chart.container():
-            st.line_chart(history_df.set_index("Step")[["Indoor PM", "Outdoor PM"]])
-        with energy_chart.container():
-            st.area_chart(history_df.set_index("Step")["Energy"], color="#2ecc71")
-
-        step += 1
-        progress_bar.progress(min(step / 288, 1.0))
-        time.sleep(sim_speed)
-
-    # --- DONE ---
-    status_text.success("Day Complete! Simulation Finished.")
+        if done:
+            status_text.success(f"Simulation Complete! ({num_days} Days Processed)")
+            st.session_state.simulation_running = False
+else:
+    st.info("👈 Select settings and click 'Start Simulation' to begin.")
