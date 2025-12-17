@@ -137,7 +137,7 @@ st.set_page_config(page_title="Smart Bedroom Dust Control", layout="wide")
 MODEL_PATH = "ppo_advanced_myenv/final_model.zip"
 STATS_PATH = "ppo_advanced_myenv/vec_normalize.pkl"
 
-st.title("🏡 Smart Bedroom Agent - Performance Dashboard")
+st.title("🏡 Smart Bedroom Dust Control System Using Reinforcement Learning (PPO)")
 
 # --- SESSION STATE INITIALIZATION ---
 if 'simulation_running' not in st.session_state: st.session_state.simulation_running = False
@@ -187,9 +187,9 @@ def reset_simulation_callback():
 if st.sidebar.button("▶️ Start Simulation"):
     st.session_state.simulation_running = True
     st.session_state.paused = False
-    # === UPDATED DATAFRAME COLUMNS ===
+    # === UPDATED DATAFRAME COLUMNS (Changed Window label) ===
     st.session_state.history_df = pd.DataFrame(columns=[
-        "Step", "Indoor PM", "Outdoor PM", "Temp", "Hum", "Window", "Occupied", "Action", "Step Energy", "Total Energy"
+        "Step", "Indoor PM", "Outdoor PM", "Indoor Temperature", "Indoor Humidity", "Window Status", "Occupied", "Action", "Step Energy", "Total Energy"
     ])
     st.session_state.current_step = 0
     st.session_state.current_obs = None
@@ -259,10 +259,11 @@ if st.session_state.simulation_running:
         pm_metric.metric("Indoor PM", f"{m['indoor']:.1f}")
         out_metric.metric("Outdoor PM", f"{m['outdoor']:.1f}")
         energy_metric.metric("Total Energy", f"{m['energy']:.0f} Wh")
-        temp_metric.metric("Temp", f"{m['temp']:.1f}°C")
-        hum_metric.metric("Humidity", f"{m['hum']:.1f}%")
+        temp_metric.metric("Indoor Temperature", f"{m['temp']:.1f}°C")
+        hum_metric.metric("Indoor Humidity", f"{m['hum']:.1f}%")
         occ_metric.metric("Occupied", m['occ'])
-        win_metric.metric("Window", m['win'])
+        # === UPDATED LABEL HERE ===
+        win_metric.metric("Window Status", m['win'])
 
     # Re-draw content from history if it exists
     if not st.session_state.history_df.empty:
@@ -284,7 +285,7 @@ if st.session_state.simulation_running:
         status_text.warning("⚠️ Simulation Paused. You can extend Duration, but not shorten it.")
         progress_bar.progress(min(st.session_state.current_step / total_steps_needed, 1.0))
     else:
-        status_text.info(f"Simulation Running... Day {int(real_env.current_step*5/60//24)+1}")
+        status_text.info(f"Simulation Running...")
         done = False
         obs = st.session_state.current_obs
         
@@ -299,16 +300,18 @@ if st.session_state.simulation_running:
             act_name = real_info["action_name"]
             temp = real_info["temperature"]; hum = real_info["humidity"]
             occ = "Yes" if real_info["occupancy"] == 1 else "No"
-            win_str = "Open" if real_info["window_status"] == 1.0 else ("Closed" if real_info["window_status"] == 0.0 else f"{int(real_info['window_status']*100)}%")
+            win_str = "Fully Open" if real_info["window_status"] == 1.0 else ("Closed" if real_info["window_status"] == 0.0 else f"{int(real_info['window_status']*100)}%")
 
             act_metric.metric("Action", act_name)
             pm_metric.metric("Indoor PM", f"{indoor:.1f}")
             out_metric.metric("Outdoor PM", f"{outdoor:.1f}")
             energy_metric.metric("Total Energy", f"{total_energy:.0f} Wh")
-            temp_metric.metric("Temp", f"{temp:.1f}°C")
-            hum_metric.metric("Humidity", f"{hum:.1f}%")
+            temp_metric.metric("Indoor Temperature", f"{temp:.1f}°C")
+            hum_metric.metric("Indoor Humidity", f"{hum:.1f}%")
             occ_metric.metric("Occupied", occ)
-            win_metric.metric("Window", win_str)
+            
+            # === UPDATED LABEL HERE ===
+            win_metric.metric("Window Status", win_str)
 
             st.session_state.last_metrics = {
                 'act': act_name, 'indoor': indoor, 'outdoor': outdoor, 'energy': total_energy,
@@ -316,13 +319,14 @@ if st.session_state.simulation_running:
             }
 
             # Add ALL metrics to the new row
+            # === UPDATED DICT KEYS TO MATCH NEW DATAFRAME COLUMNS ===
             new_row = pd.DataFrame({
                 "Step": [st.session_state.current_step], 
                 "Indoor PM": [indoor], 
                 "Outdoor PM": [outdoor], 
-                "Temp": [temp], 
-                "Hum": [hum],
-                "Window": [win_str],
+                "Indoor Temperature": [temp], 
+                "Indoor Humidity": [hum],
+                "Window Status": [win_str],  # Key changed to match column
                 "Occupied": [occ],
                 "Action": [act_name],
                 "Step Energy": [step_energy],
